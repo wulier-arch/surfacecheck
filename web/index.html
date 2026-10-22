@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>surfacecheck — 攻击面体检</title>
+<meta name="description" content="一条命令看三处攻击面：仓库里的明文凭据（含 git 历史）、线上 TLS 证书、HTTP 安全响应头。零依赖。">
+<meta property="og:type" content="website">
+<meta property="og:title" content="surfacecheck — 攻击面体检">
+<meta property="og:description" content="凭据泄露 / 证书过期 / 安全头缺失，一次扫完，按「能不能立刻被利用」排序。零依赖。">
+<meta property="og:image" content="./og.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%230b0e14'/><path d='M9 16.5l4.5 4.5L23 11.5' stroke='%234d9dff' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #111722;
+    --panel-2: #0e131c;
+    --line: #1e2737;
+    --line-soft: #182031;
+    --text: #d8dfea;
+    --dim: #7c889b;
+    --faint: #4d5768;
+    --accent: #4d9dff;
+    --critical: #ff4d5e;
+    --high: #ffab2e;
+    --review: #7c889b;
+    --ok: #35c88a;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+
+  /* 顶部细线光效，别太亮 */
+  .glow {
+    position: fixed; inset: 0 0 auto 0; height: 320px; pointer-events: none;
+    background: radial-gradient(680px 220px at 50% -40px, rgba(77,157,255,.16), transparent 70%);
+  }
+
+  header { padding: 64px 0 40px; position: relative; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .logo {
+    width: 34px; height: 34px; border-radius: 9px; flex: none;
+    background: linear-gradient(145deg, #16233a, #0d131f);
+    border: 1px solid #24344d;
+    display: grid; place-items: center;
+  }
+  h1 {
+    font-size: 30px; margin: 0; letter-spacing: -.4px; font-weight: 650;
+    font-family: var(--mono);
+  }
+  .ver { font-size: 12px; color: var(--faint); font-family: var(--mono); margin-left: 2px; }
+  .pitch { margin: 18px 0 0; font-size: 17px; color: #b6c2d4; max-width: 640px; }
+  .pitch strong { color: #fff; font-weight: 600; }
+  .meta { margin-top: 20px; display: flex; gap: 10px; flex-wrap: wrap; }
+  .chip {
+    font: 12px/1 var(--mono); color: var(--dim);
+    border: 1px solid var(--line); border-radius: 999px; padding: 7px 12px;
+    background: var(--panel-2);
+  }
+  .chip b { color: var(--text); font-weight: 600; }
+
+  section { padding: 8px 0 40px; }
+  h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 1.4px;
+    color: var(--faint); font-weight: 600; margin: 0 0 16px;
+  }
+
+  /* 输入区 */
+  .editor { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); overflow: hidden; }
+  .editor.drag { border-color: var(--accent); background: #101a29; }
+  .editor-bar {
+    display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+    border-bottom: 1px solid var(--line-soft); background: var(--panel-2);
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #2b3546; }
+  .editor-bar span { font: 12px var(--mono); color: var(--faint); margin-left: 4px; }
+  textarea {
+    width: 100%; min-height: 190px; resize: vertical; display: block;
+    background: transparent; border: 0; outline: 0; color: var(--text);
+    font: 13px/1.7 var(--mono); padding: 14px 16px;
+  }
+  textarea::placeholder { color: var(--faint); }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 14px; }
+  button {
+    font: 13px/1 -apple-system, "PingFang SC", sans-serif; cursor: pointer;
+    border-radius: 8px; padding: 10px 18px; border: 1px solid var(--line);
+    background: var(--panel); color: var(--text); transition: .15s;
+  }
+  button:hover { border-color: #2d3d56; background: #151d2b; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #04121f; font-weight: 600; }
+  button.primary:hover { background: #66acff; }
+  button.ghost { background: transparent; color: var(--dim); }
+  .hint { font-size: 12px; color: var(--faint); margin-left: auto; }
+
+  /* 结果 */
+  #result { margin-top: 28px; }
+  .empty {
+    border: 1px dashed var(--line); border-radius: 12px; padding: 28px;
+    text-align: center; color: var(--faint); font-size: 13px;
+  }
+  .tally { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 18px; }
+  .tally div {
+    font: 12px/1 var(--mono); padding: 8px 12px; border-radius: 7px;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--dim);
+  }
+  .tally div.c { color: var(--critical); border-color: #43202a; background: #1c1116; }
+  .tally div.h { color: var(--high); border-color: #43351c; background: #1a1610; }
+  .tally div.r { color: var(--review); }
+  .tally div.ok { color: var(--ok); border-color: #1c3a2c; background: #0e1a15; }
+
+  .group-title {
+    font-size: 12px; color: var(--faint); letter-spacing: .8px;
+    margin: 24px 0 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line-soft);
+  }
+  .finding {
+    border: 1px solid var(--line); border-left-width: 3px; border-radius: 9px;
+    background: var(--panel); padding: 14px 16px; margin-bottom: 10px;
+  }
+  .finding.critical { border-left-color: var(--critical); }
+  .finding.high { border-left-color: var(--high); }
+  .finding.review { border-left-color: var(--review); }
+  .finding-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .finding-name { font-weight: 600; font-size: 14.5px; }
+  .badge {
+    font: 11px/1 var(--mono); padding: 4px 7px; border-radius: 4px; flex: none;
+  }
+  .badge.critical { background: #3a1620; color: var(--critical); }
+  .badge.high { background: #33290f; color: var(--high); }
+  .badge.review { background: #1c222e; color: var(--review); }
+  .finding-where { font: 12px var(--mono); color: var(--faint); margin-top: 6px; }
+  .finding-redacted {
+    font: 12.5px var(--mono); color: #c3ccda; margin-top: 8px;
+    background: var(--panel-2); border: 1px solid var(--line-soft);
+    border-radius: 6px; padding: 8px 10px; overflow-wrap: anywhere;
+  }
+  .finding-fix { font-size: 13px; color: var(--dim); margin-top: 10px; padding-left: 14px; position: relative; }
+  .finding-fix::before { content: "→"; position: absolute; left: 0; color: var(--faint); }
+
+  /* 命令行 / 说明 */
+  pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 18px; overflow-x: auto; font: 12.5px/1.75 var(--mono); color: #b9c5d6;
+    margin: 0;
+  }
+  pre .c { color: var(--faint); }
+  pre .g { color: var(--ok); }
+  pre .r { color: var(--critical); }
+  pre .y { color: var(--high); }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .card {
+    border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; background: var(--panel-2);
+  }
+  .card h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+  .card p { margin: 0; font-size: 13px; color: var(--dim); }
+  .card p + p { margin-top: 8px; }
+
+  footer {
+    border-top: 1px solid var(--line); margin-top: 24px; padding: 28px 0 56px;
+    color: var(--faint); font-size: 12.5px; display: flex; gap: 18px; flex-wrap: wrap;
+  }
+  @media (max-width: 700px) {
+    .cols { grid-template-columns: 1fr; }
+    header { padding: 44px 0 28px; }
+    h1 { font-size: 24px; }
+    .pitch { font-size: 15.5px; }
+    .hint { margin-left: 0; width: 100%; }
+  }
+</style>
+</head>
+<body>
+<div class="glow"></div>
+
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="logo">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M4 12.5l5 5L20 6.5" stroke="#4d9dff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <h1>surfacecheck<span class="ver">v0.1.0</span></h1>
+    </div>
+    <p class="pitch">
+      一次看清三处攻击面：<strong>仓库里的明文凭据</strong>（含 git 历史）、<strong>线上证书</strong>、<strong>安全响应头</strong>。
+      结果按「能不能立刻被利用」排序，不是按字母排序。
+    </p>
+    <div class="meta">
+      <span class="chip"><b>0</b> 依赖</span>
+      <span class="chip"><b>96</b> 个测试</span>
+      <span class="chip">Node <b>≥20</b></span>
+      <span class="chip">浏览器里也是<b>本地</b>跑</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>在这里直接试</h2>
+    <div class="editor" id="editor">
+      <div class="editor-bar">
+        <i class="dot"></i><i class="dot"></i><i class="dot"></i>
+        <span>粘贴配置 / .env / 日志 / diff，或把文件拖进来</span>
+      </div>
+      <textarea id="input" spellcheck="false" placeholder="把 .env、配置、日志或 diff 粘进来（不会发请求）"></textarea>
+    </div>
+    <div class="actions">
+      <button class="primary" id="scan">扫描</button>
+      <button class="ghost" id="sample">放一段示例</button>
+      <button class="ghost" id="clear">清空</button>
+      <span class="hint">这段文字不会离开你的浏览器。</span>
+    </div>
+    <div id="result"><div class="empty">还没有内容。粘贴一段，或点「放一段示例」。</div></div>
+  </section>
+
+  <section>
+    <h2>命令行里更全</h2>
+    <pre><span class="c"># 扫当前仓库（连 git 历史一起），再体检线上站点</span>
+npx surfacecheck . --url https://example.com
+
+<span class="c"># 只扫线上，不碰本地代码</span>
+npx surfacecheck --url example.com
+
+<span class="c"># CI 里用：有「严重」就以退出码 1 失败</span>
+npx surfacecheck . --json --fail-on critical</pre>
+    <div class="cols" style="margin-top:16px">
+      <div class="card">
+        <h3>为什么扫 git 历史</h3>
+        <p>泄露最常发生的位置不是当前代码，而是三年前那个已经删掉的 commit。只扫工作区等于给自己发一张假的安全证明。</p>
+      </div>
+      <div class="card">
+        <h3>为什么报告里是打码的</h3>
+        <p>报告本身不能变成新的泄露源。输出只保留前 4 位和长度——够你定位是哪把 key，不够别人拿去用。</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>MIT</span>
+    <a href="https://github.com/wulier-arch/surfacecheck">GitHub</a>
+    <a href="https://github.com/wulier-arch/surfacecheck/blob/main/README.md">文档</a>
+    <span style="margin-left:auto">扫到的都是线索，不是判决。人工确认这一步不能省。</span>
+  </footer>
+</div>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

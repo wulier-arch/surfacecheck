@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22", "24"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 文档核查要跑 git 历史扫描，浅克隆会让结果和本地不一致
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # 零依赖，没有 npm install 这一步
+      - name: 单元测试
+        run: npm test
+
+      - name: 文档事实核查 + 测试结构自检
+        run: npm run check
+
+      - name: 演示脚本能跑通
+        run: node scripts/demo.mjs > /dev/null
+
+      # 用工具扫自己。历史扫描在浅克隆下会漏，所以上面 fetch-depth: 0 不能去掉
+      - name: 自扫
+        run: node src/cli.mjs . --fail-on high

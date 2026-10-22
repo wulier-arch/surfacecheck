@@ -1,0 +1,37 @@
+{
+  "name": "surfacecheck",
+  "version": "0.1.0",
+  "description": "一条命令看三处攻击面：仓库里的明文凭据（含 git 历史）、线上 TLS 证书、HTTP 安全响应头。零依赖。",
+  "type": "module",
+  "bin": {
+    "surfacecheck": "src/cli.mjs"
+  },
+  "main": "src/cli.mjs",
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check": "node scripts/check-docs.mjs && node scripts/check-test-layout.mjs",
+    "start": "node src/cli.mjs"
+  },
+  "keywords": [
+    "security",
+    "secret-scanning",
+    "tls",
+    "certificate",
+    "security-headers",
+    "leak",
+    "devsecops"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wulier-arch/surfacecheck.git"
+  }
+}
