@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { scanFiles, scanGitHistory } from "../src/scan-fs.mjs";
+import { collectManifests, queryVulnerabilities, evaluateDependencies } from "../src/check-deps.mjs";
 import { renderTerminal } from "../src/report.mjs";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -75,6 +76,25 @@ try {
       "",
     ].join("\n")
   );
+  // 顺带放一份 composer.lock：这是「你一行没写错，但上游坏了」那一类问题
+  writeFileSync(
+    join(dir, "composer.json"),
+    `${JSON.stringify({ require: { "laravel/framework": "8.83.0" } }, null, 2)}\n`
+  );
+  writeFileSync(
+    join(dir, "composer.lock"),
+    `${JSON.stringify(
+      {
+        packages: [
+          { name: "laravel/framework", version: "v8.83.0" },
+          { name: "guzzlehttp/guzzle", version: "6.5.0" },
+        ],
+        "packages-dev": [],
+      },
+      null,
+      2
+    )}\n`
+  );
   commitAt("feat: 加上部署脚本", "2025-09-17T08:00:00Z");
 
   // ---- 第 90 天：有人发现不对，把密钥挪进环境变量 ----
@@ -104,6 +124,40 @@ try {
   const unique = new Set(history.findings.map((f) => `${f.ruleId}:${f.commit}`));
   console.log(`  历史里仍然躺着 ${unique.size} 条不同位置的凭据。`);
   console.log("  轮换密钥是必须的——清理历史不能让它变回安全。\n");
+
+  // ---- 第三段：依赖漏洞 ----
+  const manifests = collectManifests(dir);
+  const packages = manifests.flatMap((m) =>
+    m.packages.map((pkg) => ({ ...pkg, ecosystem: m.ecosystem, file: m.file }))
+  );
+
+  console.log("依赖漏洞（查 osv.dev）：");
+  if (!packages.length) {
+    console.log("  没有可查的锁文件。\n");
+  } else {
+    const { results, details, unavailable, reason } = await queryVulnerabilities(packages, { timeout: 15000 });
+    if (unavailable) {
+      console.log(`  没查成（${reason}）。这一项不算「干净」。\n`);
+    } else {
+      const depFindings = evaluateDependencies(packages, results, details);
+      console.log(
+        renderTerminal(depFindings, {
+          color: process.stdout.isTTY,
+          targets: {
+            repo: "demo-repo",
+            manifests: manifests.map((m) => ({
+              file: m.file,
+              ecosystem: m.ecosystem,
+              lock: m.lock,
+              packages: m.packages.length,
+            })),
+          },
+        })
+      );
+      console.log(`  ${packages.length} 个包里有 ${new Set(depFindings.map((f) => f.name)).size} 个命中已知漏洞。`);
+      console.log("  这一层跟你有没有写错代码无关：版本在锁文件里，漏洞在上游。\n");
+    }
+  }
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

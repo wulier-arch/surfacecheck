@@ -91,6 +91,22 @@ if (actualTests === null) {
   }
 }
 
+/* --------------------------------- 4b. 三处版本号必须和 package.json 一致 */
+{
+  const cliVersion = read("src/cli.mjs").match(/^const VERSION = "([^"]+)";$/m)?.[1];
+  if (cliVersion !== pkg.version) {
+    errors.push(`src/cli.mjs 的 VERSION 是 ${cliVersion}，package.json 是 ${pkg.version}`);
+  }
+  const jsonVersion = read("src/report.mjs").match(/version: "([^"]+)",/)?.[1];
+  if (jsonVersion !== pkg.version) {
+    errors.push(`src/report.mjs 的 JSON 版本是 ${jsonVersion}，package.json 是 ${pkg.version}`);
+  }
+  const pageVersion = read("web/index.html").match(/<span class="ver">v([^<]+)<\/span>/)?.[1];
+  if (pageVersion !== pkg.version) {
+    errors.push(`web/index.html 显示的版本是 ${pageVersion}，package.json 是 ${pkg.version}`);
+  }
+}
+
 /* ------------------------------------------------- 5. README 相对链接 */
 {
   const readme = read("README.md");

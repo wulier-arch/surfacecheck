@@ -1,6 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseSAN, sanCoversHost, evaluateCertificate } from "../src/check-cert.mjs";
+import {
+  parseSAN,
+  sanCoversHost,
+  evaluateCertificate,
+  evaluatePublicKey,
+} from "../src/check-cert.mjs";
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = new Date("2026-10-22T00:00:00Z").getTime();
@@ -174,4 +179,147 @@ test("拿不到证书时报一条，不抛错", () => {
   assert.equal(findings.length, 1);
   assert.equal(findings[0].ruleId, "cert-missing");
   assert.equal(info.daysLeft, null);
+});
+
+/* ------------------------------- 剩余寿命比例（64 天证书时代的主判据） */
+
+const DAY_MS = DAY;
+
+/** 造一张指定总寿命、剩余天数的证书 */
+function certWithLifetime({ lifetimeDays, daysLeft }) {
+  const validTo = new Date(NOW + daysLeft * DAY_MS);
+  return {
+    subject: { CN: "example.com" },
+    issuer: { O: "Let's Encrypt" },
+    valid_to: validTo.toISOString(),
+    valid_from: new Date(validTo.getTime() - lifetimeDays * DAY_MS).toISOString(),
+    subjectaltname: "DNS:example.com",
+  };
+}
+
+test("90 天证书剩 25 天：剩余寿命不足三分之一", () => {
+  const { findings, info } = evaluateCertificate(certWithLifetime({ lifetimeDays: 90, daysLeft: 25 }), {
+    host: "example.com",
+    protocol: "TLSv1.3",
+    authorized: true,
+    now: NOW,
+  });
+  assert.equal(findings[0].ruleId, "cert-expiring-soon");
+  assert.equal(info.lifetimeDays, 90);
+  assert.ok(Math.abs(info.remainingRatio - 25 / 90) < 0.01);
+});
+
+test("64 天证书剩 25 天：比例只剩 39%，仍不告警（还没到三分之一）", () => {
+  const { findings } = evaluateCertificate(certWithLifetime({ lifetimeDays: 64, daysLeft: 25 }), {
+    host: "example.com",
+    protocol: "TLSv1.3",
+    authorized: true,
+    now: NOW,
+  });
+  assert.deepEqual(findings, [], "39% 还不到三分之一，不该报");
+});
+
+test("64 天证书剩 20 天：比例 31%，触发告警", () => {
+  const { findings } = evaluateCertificate(certWithLifetime({ lifetimeDays: 64, daysLeft: 20 }), {
+    host: "example.com",
+    protocol: "TLSv1.3",
+    authorized: true,
+    now: NOW,
+  });
+  assert.equal(findings[0].ruleId, "cert-expiring-soon");
+});
+
+test("7 天短周期证书：不会因为绝对阈值 30 天而一直报警", () => {
+  const { findings } = evaluateCertificate(certWithLifetime({ lifetimeDays: 7, daysLeft: 6 }), {
+    host: "example.com",
+    protocol: "TLSv1.3",
+    authorized: true,
+    now: NOW,
+  });
+  assert.deepEqual(findings, [], "刚签发一天的短证书不该报，否则用户会把告警关掉");
+});
+
+test("7 天短周期证书剩 1 天：按比例触发高危", () => {
+  const { findings } = evaluateCertificate(certWithLifetime({ lifetimeDays: 7, daysLeft: 1 }), {
+    host: "example.com",
+    protocol: "TLSv1.3",
+    authorized: true,
+    now: NOW,
+  });
+  assert.equal(findings[0].ruleId, "cert-expiring");
+});
+
+test("有效期超过 398 天报待确认", () => {
+  const { findings } = evaluateCertificate(certWithLifetime({ lifetimeDays: 730, daysLeft: 700 }), {
+    host: "example.com",
+    protocol: "TLSv1.3",
+    authorized: true,
+    now: NOW,
+  });
+  assert.equal(findings[0].ruleId, "cert-lifetime-long");
+});
+
+/* ------------------------------------------------------ 公钥强度 */
+
+test("evaluatePublicKey：RSA 1024 位判为弱", () => {
+  const result = evaluatePublicKey({ asymmetricKeyType: "rsa", asymmetricKeyDetails: { modulusLength: 1024 } });
+  assert.equal(result.weak, true);
+  assert.ok(result.reason.includes("1024"));
+});
+
+test("evaluatePublicKey：RSA 2048 位正常", () => {
+  const result = evaluatePublicKey({ asymmetricKeyType: "rsa", asymmetricKeyDetails: { modulusLength: 2048 } });
+  assert.equal(result.weak, false);
+  assert.equal(result.bits, 2048);
+});
+
+test("evaluatePublicKey：prime256v1 正常", () => {
+  const result = evaluatePublicKey({ asymmetricKeyType: "ec", asymmetricKeyDetails: { namedCurve: "prime256v1" } });
+  assert.equal(result.weak, false);
+});
+
+test("evaluatePublicKey：已知弱曲线判为弱", () => {
+  const result = evaluatePublicKey({ asymmetricKeyType: "ec", asymmetricKeyDetails: { namedCurve: "secp192r1" } });
+  assert.equal(result.weak, true);
+});
+
+test("evaluatePublicKey：拿不到公钥时不猜", () => {
+  const result = evaluatePublicKey(null);
+  assert.equal(result.weak, false);
+  assert.equal(result.type, null);
+});
+
+test("弱公钥会变成一条高危", () => {
+  const { findings } = evaluateCertificate(cert(), {
+    host: "example.com",
+    protocol: "TLSv1.3",
+    authorized: true,
+    now: NOW,
+    meta: { weakKeyReason: "RSA 1024 位，低于 2048 位" },
+  });
+  assert.equal(findings[0].ruleId, "cert-key-weak");
+  assert.equal(findings[0].severity, "high");
+});
+
+test("自签证书报高危", () => {
+  const { findings } = evaluateCertificate(cert(), {
+    host: "example.com",
+    protocol: "TLSv1.3",
+    authorized: true,
+    now: NOW,
+    meta: { selfSigned: true },
+  });
+  assert.equal(findings[0].ruleId, "cert-self-signed");
+});
+
+test("info 里带上链深度和公钥信息", () => {
+  const { info } = evaluateCertificate(cert(), {
+    host: "example.com",
+    protocol: "TLSv1.3",
+    authorized: true,
+    now: NOW,
+    meta: { keyType: "ec", keyBits: null, chainDepth: 2 },
+  });
+  assert.equal(info.keyType, "ec");
+  assert.equal(info.chainDepth, 2);
 });

@@ -79,11 +79,11 @@
           <path d="M4 12.5l5 5L20 6.5" stroke="#4d9dff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </div>
-      <h1>surfacecheck<span class="ver">v0.1.0</span></h1>
+      <h1>surfacecheck<span class="ver">v0.2.0</span></h1>
     </div>
 
     <p class="pitch">
-      凭据泄露、证书过期、安全头缺失 —— <b>一次扫完</b>，<br>
+      凭据泄露、证书过期、安全头缺失、依赖漏洞 —— <b>一次扫完</b>，<br>
       按「能不能立刻被利用」排序，不按字母排序。
     </p>
 
@@ -93,10 +93,10 @@
         <span class="what">AWS Access Key ID</span>
         <span class="val">config/prod.env:3</span>
       </div>
-      <div class="row c">
-        <span class="tag">严重</span>
-        <span class="what">私钥文件内容</span>
-        <span class="val">commit 8f2c1ab</span>
+      <div class="row h">
+        <span class="tag">高</span>
+        <span class="what">laravel/framework 8.83.0 有已知漏洞</span>
+        <span class="val">CVE-2026-48019 · CVSS 8.9</span>
       </div>
       <div class="row h">
         <span class="tag">高</span>
@@ -105,15 +105,15 @@
       </div>
       <div class="row r">
         <span class="tag">待确认</span>
-        <span class="what">证书 30 天内过期</span>
-        <span class="val">剩 22 天</span>
+        <span class="what">证书剩余寿命不足三分之一</span>
+        <span class="val">剩 20/64 天</span>
       </div>
     </div>
 
     <div class="foot">
       <span>0 依赖</span>
       <span class="sep"></span>
-      <span>96 个测试</span>
+      <span>148 个测试</span>
       <span class="sep"></span>
       <span>Node ≥20</span>
       <span class="sep"></span>

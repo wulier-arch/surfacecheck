@@ -1,13 +1,35 @@
 /**
  * TLS 证书检查。
  *
- * 只报 Node 能拿到的事实：有效期、链是否可信、SAN 是否覆盖域名、协议版本。
+ * 只报能拿到的事实：有效期、链是否可信、SAN 是否覆盖域名、协议版本、公钥强度。
  * **不判断签名算法强度**——Node 的 TLS 接口不暴露这个字段，硬猜就是编数据。
+ *
+ * 2026 年 10 月这一周把证书问题的三个面全暴露了：
+ *   - UiPath 停机（10-13）：出事的是 AI/ML 依赖链上的**次级端点**，不是主站，
+ *     而且事发前根本没有到期监控
+ *   - eMudhra 的 8 张中间 CA 私钥弱到能被算出来（P-384 私钥的整数是 4、56、66 这种）
+ *   - Let's Encrypt 宣布 2027-02-10 起有效期从 90 天缩到 64 天
+ *
+ * 所以这里不再只数「还剩几天」：
+ *   1. 用**剩余寿命比例**做主判据。64 天证书上写死「30 天内告警」等于只剩一半寿命才提醒；
+ *      而 7 天的证书会让绝对阈值永远在响，用户第一件事就是把告警关掉。
+ *   2. 检查公钥强度。弱密钥不是理论问题，是已经发生过的事故。
+ *   3. 给出链深度和是否自签，让「次级端点用了自签证书」这类事能被看见。
  */
 
 import tls from "node:tls";
+import { X509Certificate } from "node:crypto";
 
 const DAY = 24 * 60 * 60 * 1000;
+
+/** CA/B Forum 对公网证书有效期的上限（398 天） */
+const MAX_LIFETIME_DAYS = 398;
+
+/** RSA 密钥低于这个位数，2026 年已经不该出现在公网证书上 */
+const MIN_RSA_BITS = 2048;
+
+/** 这些曲线已经不安全 */
+const WEAK_CURVES = new Set(["secp112r1", "secp112r2", "secp128r1", "secp128r2", "secp160k1", "secp160r1", "secp160r2", "secp192k1", "secp192r1", "prime192v1"]);
 
 /** "DNS:a.com, DNS:*.b.com" → ["a.com", "*.b.com"] */
 export function parseSAN(subjectaltname) {
@@ -32,8 +54,39 @@ export function sanCoversHost(san, host) {
   });
 }
 
-/** 把一个已建立的 TLS 连接上的证书转成体检结论（纯函数，方便测试） */
-export function evaluateCertificate(cert, { host, protocol, authorized, now = Date.now() }) {
+/** 公钥强度：返回 {type, bits, weak, reason} */
+export function evaluatePublicKey(publicKey) {
+  if (!publicKey) return { type: null, bits: null, weak: false, reason: null };
+  const type = publicKey.asymmetricKeyType ?? null;
+  const details = publicKey.asymmetricKeyDetails ?? {};
+
+  if (type === "rsa" || type === "rsa-pss") {
+    const bits = details.modulusLength ?? null;
+    if (bits !== null && bits < MIN_RSA_BITS) {
+      return { type, bits, weak: true, reason: `RSA ${bits} 位，低于 ${MIN_RSA_BITS} 位` };
+    }
+    return { type, bits, weak: false, reason: null };
+  }
+
+  if (type === "ec") {
+    const curve = details.namedCurve ?? null;
+    if (curve && WEAK_CURVES.has(curve)) {
+      return { type, bits: null, weak: true, reason: `椭圆曲线 ${curve} 已不安全` };
+    }
+    return { type, bits: null, curve, weak: false, reason: null };
+  }
+
+  return { type, bits: null, weak: false, reason: null };
+}
+
+/**
+ * 把一个已建立的 TLS 连接上的证书转成体检结论（纯函数，方便测试）。
+ *
+ * @param {object} cert getPeerCertificate(true) 的返回值
+ * @param {{host, protocol, authorized, now?, meta?}} options
+ *        meta 可带 {validFrom, validTo, keyType, keyBits, weakKeyReason, chainDepth, selfSigned}
+ */
+export function evaluateCertificate(cert, { host, protocol, authorized, now = Date.now(), meta = {} }) {
   const findings = [];
 
   if (!cert || !cert.valid_to) {
@@ -55,8 +108,23 @@ export function evaluateCertificate(cert, { host, protocol, authorized, now = Da
 
   const validTo = new Date(cert.valid_to);
   const daysLeft = Math.floor((validTo.getTime() - now) / DAY);
+
+  const validFromRaw = meta.validFrom ?? cert.valid_from ?? null;
+  const validFrom = validFromRaw ? new Date(validFromRaw) : null;
+  const lifetimeDays =
+    validFrom && Number.isFinite(validFrom.getTime())
+      ? Math.round((validTo.getTime() - validFrom.getTime()) / DAY)
+      : null;
+  const remainingRatio =
+    lifetimeDays && lifetimeDays > 0 ? Math.max(0, daysLeft / lifetimeDays) : null;
+
   const san = parseSAN(cert.subjectaltname);
 
+  // ---- 过期 ----
+  // 判据分两层：
+  //   有 valid_from → 按**剩余寿命比例**判。写死天数在 64 天证书上等于「剩一半才提醒」，
+  //                  在 7 天证书上则永远在响，用户第一件事就是把告警关掉。
+  //   没有 valid_from（旧接口 / 异常证书）→ 退回固定天数，但不能因此漏报。
   if (daysLeft < 0) {
     findings.push({
       ruleId: "cert-expired",
@@ -67,7 +135,7 @@ export function evaluateCertificate(cert, { host, protocol, authorized, now = Da
       redacted: `已于 ${validTo.toISOString().slice(0, 10)} 过期（${Math.abs(daysLeft)} 天前）`,
       fix: "立刻续期。过期证书会让所有客户端直接报错，且部分 SDK 会缓存失败结果。",
     });
-  } else if (daysLeft <= 14) {
+  } else if (daysLeft <= 3) {
     findings.push({
       ruleId: "cert-expiring",
       name: "证书即将过期",
@@ -77,18 +145,65 @@ export function evaluateCertificate(cert, { host, protocol, authorized, now = Da
       redacted: `${daysLeft} 天后过期（${validTo.toISOString().slice(0, 10)}）`,
       fix: "现在就续，不要等到最后一天；确认自动续期的定时任务还在跑。",
     });
-  } else if (daysLeft <= 30) {
+  } else if (lifetimeDays === null) {
+    // 拿不到签发日期，只能用固定天数兜底
+    if (daysLeft <= 14) {
+      findings.push({
+        ruleId: "cert-expiring",
+        name: "证书即将过期",
+        severity: "high",
+        file: host,
+        line: 0,
+        redacted: `${daysLeft} 天后过期（${validTo.toISOString().slice(0, 10)}）`,
+        fix: "现在就续，不要等到最后一天；确认自动续期的定时任务还在跑。",
+      });
+    } else if (daysLeft <= 30) {
+      findings.push({
+        ruleId: "cert-expiring-soon",
+        name: "证书 30 天内过期",
+        severity: "review",
+        file: host,
+        line: 0,
+        redacted: `${daysLeft} 天后过期（${validTo.toISOString().slice(0, 10)}）`,
+        fix: "排进本周的待办，确认自动续期可用。",
+      });
+    }
+  } else if (remainingRatio <= 1 / 6) {
+    findings.push({
+      ruleId: "cert-expiring",
+      name: "证书剩余寿命不足六分之一",
+      severity: "high",
+      file: host,
+      line: 0,
+      redacted: `剩 ${daysLeft}/${lifetimeDays} 天（${Math.round(remainingRatio * 100)}%）`,
+      fix: "现在就续。按「到期前固定天数」写的定时任务在 64 天证书上会失效——Let's Encrypt 2027-02-10 起有效期缩到 64 天，续期要改成按寿命比例。",
+    });
+  } else if (remainingRatio <= 1 / 3) {
     findings.push({
       ruleId: "cert-expiring-soon",
-      name: "证书 30 天内过期",
+      name: "证书剩余寿命不足三分之一",
       severity: "review",
       file: host,
       line: 0,
-      redacted: `${daysLeft} 天后过期（${validTo.toISOString().slice(0, 10)}）`,
-      fix: "排进本周的待办，确认自动续期可用。",
+      redacted: `剩 ${daysLeft}/${lifetimeDays} 天（${Math.round(remainingRatio * 100)}%）`,
+      fix: "把续期排在到期前三分之二处，而不是写死「提前 30 天」。",
     });
   }
 
+  // ---- 有效期异常长 ----
+  if (lifetimeDays !== null && lifetimeDays > MAX_LIFETIME_DAYS) {
+    findings.push({
+      ruleId: "cert-lifetime-long",
+      name: "证书有效期超过上限",
+      severity: "review",
+      file: host,
+      line: 0,
+      redacted: `${lifetimeDays} 天，超过 CA/B Forum 的 ${MAX_LIFETIME_DAYS} 天上限`,
+      fix: "多数浏览器会拒绝这类证书。确认是不是自建 CA 签的，以及客户端是否真的信任它。",
+    });
+  }
+
+  // ---- 链 ----
   if (authorized === false) {
     findings.push({
       ruleId: "cert-chain",
@@ -101,6 +216,32 @@ export function evaluateCertificate(cert, { host, protocol, authorized, now = Da
     });
   }
 
+  if (meta.selfSigned) {
+    findings.push({
+      ruleId: "cert-self-signed",
+      name: "自签证书",
+      severity: "high",
+      file: host,
+      line: 0,
+      redacted: "签发者与主体相同",
+      fix: "自签只适合内网。公网端点用自签，等于让所有客户端关掉校验——UiPath 那次停机就是次级端点上的证书没人管。",
+    });
+  }
+
+  // ---- 公钥强度 ----
+  if (meta.weakKeyReason) {
+    findings.push({
+      ruleId: "cert-key-weak",
+      name: "公钥强度不足",
+      severity: "high",
+      file: host,
+      line: 0,
+      redacted: meta.weakKeyReason,
+      fix: "换一张密钥强度达标的证书。eMudhra 那 8 张中间 CA 就是因为私钥随机性不足，能从公开证书里直接算出私钥。",
+    });
+  }
+
+  // ---- SAN ----
   if (san.length && !sanCoversHost(san, host)) {
     findings.push({
       ruleId: "cert-san",
@@ -113,6 +254,7 @@ export function evaluateCertificate(cert, { host, protocol, authorized, now = Da
     });
   }
 
+  // ---- 协议版本 ----
   if (protocol === "TLSv1" || protocol === "TLSv1.1") {
     findings.push({
       ruleId: "cert-protocol",
@@ -132,10 +274,45 @@ export function evaluateCertificate(cert, { host, protocol, authorized, now = Da
       issuer: cert.issuer?.O ?? cert.issuer?.CN ?? null,
       validTo: validTo.toISOString().slice(0, 10),
       daysLeft,
+      lifetimeDays,
+      remainingRatio,
+      keyType: meta.keyType ?? null,
+      keyBits: meta.keyBits ?? null,
+      chainDepth: meta.chainDepth ?? null,
+      selfSigned: Boolean(meta.selfSigned),
       protocol,
       authorized: Boolean(authorized),
     },
     findings,
+  };
+}
+
+/** 从 X509Certificate 里抽出评估需要的元信息 */
+export function extractMeta(x509, peerChain) {
+  const key = evaluatePublicKey(x509.publicKey);
+  let chainDepth = 0;
+  let selfSigned = x509.subject === x509.issuer;
+
+  // peerChain 是 getPeerCertificate(true) 的链，逐层往上数
+  let cursor = peerChain;
+  while (cursor?.issuerCertificate && chainDepth < 8) {
+    chainDepth += 1;
+    if (cursor.issuerCertificate === cursor) break;
+    cursor = cursor.issuerCertificate;
+    if (cursor.subject === cursor.issuer) {
+      selfSigned = false; // 根自签是正常的，不算站点自签
+      break;
+    }
+  }
+
+  return {
+    validFrom: x509.validFrom,
+    validTo: x509.validTo,
+    keyType: key.type,
+    keyBits: key.bits,
+    weakKeyReason: key.reason,
+    chainDepth,
+    selfSigned,
   };
 }
 
@@ -154,52 +331,38 @@ export function checkCert(host, { port = 443, timeout = 8000 } = {}) {
       resolve(value);
     };
 
+    const fail = (ruleId, name, severity, detail, fix) => ({
+      info: { host, subject: null, issuer: null, validTo: null, daysLeft: null, protocol: null, authorized: null },
+      findings: [{ ruleId, name, severity, file: host, line: 0, redacted: detail, fix }],
+    });
+
     const socket = tls.connect(
       { host, port, servername: host, rejectUnauthorized: false, timeout },
       () => {
-        const cert = socket.getPeerCertificate(true);
+        const peer = socket.getPeerCertificate(true);
+        let meta = {};
+        try {
+          if (peer?.raw) meta = extractMeta(new X509Certificate(peer.raw), peer);
+        } catch {
+          // 拿不到 X509 就退回只用 peer 上的字段，不因此判定失败
+        }
         done(
-          evaluateCertificate(cert, {
+          evaluateCertificate(peer, {
             host,
             protocol: socket.getProtocol(),
             authorized: socket.authorized,
+            meta,
           })
         );
       }
     );
 
     socket.on("error", (error) => {
-      done({
-        info: { host, subject: null, issuer: null, validTo: null, daysLeft: null, protocol: null, authorized: null },
-        findings: [
-          {
-            ruleId: "cert-unreachable",
-            name: "连不上",
-            severity: "review",
-            file: host,
-            line: 0,
-            redacted: error.code || error.message,
-            fix: "确认域名解析、端口和防火墙。",
-          },
-        ],
-      });
+      done(fail("cert-unreachable", "连不上", "review", error.code || error.message, "确认域名解析、端口和防火墙。"));
     });
 
     socket.setTimeout(timeout, () => {
-      done({
-        info: { host, subject: null, issuer: null, validTo: null, daysLeft: null, protocol: null, authorized: null },
-        findings: [
-          {
-            ruleId: "cert-timeout",
-            name: "握手超时",
-            severity: "review",
-            file: host,
-            line: 0,
-            redacted: `${timeout}ms 内没完成握手`,
-            fix: "确认网络可达；某些网络环境会拦截 443。",
-          },
-        ],
-      });
+      done(fail("cert-timeout", "握手超时", "review", `${timeout}ms 内没完成握手`, "确认网络可达；某些网络环境会拦截 443。"));
     });
   });
 }

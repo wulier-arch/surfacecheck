@@ -120,15 +120,32 @@ export function renderTerminal(findings, { color = true, width = 88, targets = {
     out.push(`  ${paint(DIM, "历史")}  ${targets.commits} 个 commit`);
   }
   if (targets.hosts?.length) out.push(`  ${paint(DIM, "站点")}  ${targets.hosts.join(", ")}`);
+  for (const manifest of targets.manifests ?? []) {
+    const lock = manifest.lock ? "" : "（没有锁文件，只查了写死版本的依赖）";
+    out.push(`  ${paint(DIM, "依赖")}  ${manifest.file}  ${manifest.ecosystem} ${manifest.packages} 个包${lock}`);
+  }
+  if (targets.manifests && targets.manifests.length === 0) {
+    out.push(`  ${paint(DIM, "依赖")}  没找到锁文件，跳过`);
+  }
+  if (targets.depsUnavailable) {
+    out.push(`  ${paint(DIM, "依赖")}  ${paint("\u001b[33m", "没查成")}（${targets.depsUnavailable}）`);
+  }
+  if (targets.depsTruncated) {
+    out.push(`  ${paint(DIM, "依赖")}  漏洞条目太多，只取了一部分详情`);
+  }
   for (const cert of targets.certs ?? []) {
     if (!cert.validTo) continue;
     const left = cert.daysLeft === null ? "" : `，剩 ${cert.daysLeft} 天`;
-    out.push(`  ${paint(DIM, "证书")}  ${cert.host}  到期 ${cert.validTo}${left}${cert.issuer ? `（${cert.issuer}）` : ""}`);
+    const key = cert.keyType ? `，${cert.keyType.toUpperCase()}${cert.keyBits ? " " + cert.keyBits : ""}` : "";
+    out.push(`  ${paint(DIM, "证书")}  ${cert.host}  到期 ${cert.validTo}${left}${key}${cert.issuer ? `（${cert.issuer}）` : ""}`);
   }
   out.push("");
 
   if (!sorted.length) {
     out.push(paint("\u001b[32m", "  ✓ 没有发现问题。"));
+    if (targets.depsUnavailable) {
+      out.push(paint("\u001b[33m", "    但依赖漏洞这一项没查成——上面的「没有」不包括它。"));
+    }
     out.push(paint(DIM, "    注意：这是「没扫到」，不是「不存在」。"));
     out.push("");
     return out.join("\n");
@@ -182,7 +199,7 @@ export function renderJson(findings, targets = {}) {
   return JSON.stringify(
     {
       tool: "surfacecheck",
-      version: "0.1.0",
+      version: "0.2.0",
       targets,
       summary: summarize(findings),
       findings: sortForReport(findings),

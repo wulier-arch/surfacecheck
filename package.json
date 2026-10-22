@@ -1,6 +1,6 @@
 {
   "name": "surfacecheck",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "一条命令看三处攻击面：仓库里的明文凭据（含 git 历史）、线上 TLS 证书、HTTP 安全响应头。零依赖。",
   "type": "module",
   "bin": {

@@ -189,15 +189,15 @@
           <path d="M4 12.5l5 5L20 6.5" stroke="#4d9dff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </div>
-      <h1>surfacecheck<span class="ver">v0.1.0</span></h1>
+      <h1>surfacecheck<span class="ver">v0.2.0</span></h1>
     </div>
     <p class="pitch">
-      一次看清三处攻击面：<strong>仓库里的明文凭据</strong>（含 git 历史）、<strong>线上证书</strong>、<strong>安全响应头</strong>。
+      一次看清四处攻击面：<strong>仓库里的明文凭据</strong>（含 git 历史）、<strong>线上证书</strong>、<strong>安全响应头</strong>、<strong>依赖漏洞</strong>。
       结果按「能不能立刻被利用」排序，不是按字母排序。
     </p>
     <div class="meta">
       <span class="chip"><b>0</b> 依赖</span>
-      <span class="chip"><b>96</b> 个测试</span>
+      <span class="chip"><b>148</b> 个测试</span>
       <span class="chip">Node <b>≥20</b></span>
       <span class="chip">浏览器里也是<b>本地</b>跑</span>
     </div>
@@ -239,6 +239,14 @@ npx surfacecheck . --json --fail-on critical</pre>
       <div class="card">
         <h3>为什么报告里是打码的</h3>
         <p>报告本身不能变成新的泄露源。输出只保留前 4 位和长度——够你定位是哪把 key，不够别人拿去用。</p>
+      </div>
+      <div class="card">
+        <h3>依赖漏洞要命令行</h3>
+        <p>查 OSV 需要读锁文件、发网络请求，浏览器做不到。命令行里 <code>surfacecheck .</code> 会自动带上。</p>
+      </div>
+      <div class="card">
+        <h3>证书按剩余寿命判</h3>
+        <p>不写死「30 天内过期」。Let's Encrypt 2027 年起有效期缩到 64 天，按固定天数写的告警要么太晚，要么一直在响。</p>
       </div>
     </div>
   </section>

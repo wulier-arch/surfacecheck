@@ -13,12 +13,13 @@ import { resolve, basename } from "node:path";
 import { scanFiles, collectFiles, scanGitHistory, isGitRepo } from "./scan-fs.mjs";
 import { checkCert } from "./check-cert.mjs";
 import { checkHeaders } from "./check-headers.mjs";
+import { collectManifests, queryVulnerabilities, evaluateDependencies } from "./check-deps.mjs";
 import { renderTerminal, renderJson, summarize } from "./report.mjs";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 const HELP = `
-surfacecheck ${VERSION} — 攻击面体检：明文凭据 / 证书 / 安全响应头
+surfacecheck ${VERSION} — 攻击面体检：明文凭据 / 证书 / 安全头 / 依赖漏洞
 
 用法
   surfacecheck [目录] [选项]
@@ -28,6 +29,7 @@ surfacecheck ${VERSION} — 攻击面体检：明文凭据 / 证书 / 安全响�
   --url <地址>        检查线上站点，可重复；自动做证书 + 安全头
   --no-history        跳过 git 历史（默认会扫，历史里的泄露更常见）
   --no-files          只扫线上，不扫本地文件
+  --no-deps           不查依赖漏洞（默认会查，需要联网访问 osv.dev）
   --json              输出 JSON，给 CI 用
   --fail-on <级别>    达到该级别就以退出码 1 结束：critical | high | review | none
                       默认 high
@@ -36,7 +38,7 @@ surfacecheck ${VERSION} — 攻击面体检：明文凭据 / 证书 / 安全响�
   -v, --version       显示版本
 
 例子
-  surfacecheck .                              # 扫当前仓库，含 git 历史
+  surfacecheck .                              # 扫当前仓库：凭据 + 历史 + 依赖漏洞
   surfacecheck --url https://example.com      # 只看线上
   surfacecheck . --url https://example.com    # 一起看
   surfacecheck . --json --fail-on critical    # CI 里只拦「严重」
@@ -53,6 +55,7 @@ function parseArgs(argv) {
     urls: [],
     history: true,
     files: true,
+    deps: true,
     json: false,
     failOn: "high",
     color: true,
@@ -80,6 +83,9 @@ function parseArgs(argv) {
         break;
       case "--no-files":
         options.files = false;
+        break;
+      case "--no-deps":
+        options.deps = false;
         break;
       case "--json":
         options.json = true;
@@ -148,7 +154,8 @@ async function main() {
   // ---- 本地 ----
   const dir = resolve(options.dir ?? process.cwd());
   // 只给 --url 时不顺带扫当前目录：用户说「看线上」，就别擅自翻他本地代码
-  const wantsLocal = (options.files || options.history) && (options.dir !== null || options.urls.length === 0);
+  const wantsLocal =
+    (options.files || options.history || options.deps) && (options.dir !== null || options.urls.length === 0);
 
   if (wantsLocal) {
     if (!existsSync(dir) || !statSync(dir).isDirectory()) {
@@ -173,6 +180,37 @@ async function main() {
     }
 
     targets.repo = basename(dir) || dir;
+
+    // ---- 依赖漏洞 ----
+    if (options.deps) {
+      const manifests = collectManifests(dir);
+      if (manifests.length) {
+        const packages = manifests.flatMap((m) =>
+          m.packages.map((pkg) => ({ ...pkg, ecosystem: m.ecosystem, file: m.file }))
+        );
+        targets.manifests = manifests.map((m) => ({
+          file: m.file,
+          ecosystem: m.ecosystem,
+          lock: m.lock,
+          packages: m.packages.length,
+          error: m.error ?? null,
+        }));
+
+        if (packages.length) {
+          const { results, details, unavailable, reason, truncated } = await queryVulnerabilities(packages);
+          if (unavailable) {
+            // 「查不了」和「没问题」必须分开说，否则用户会以为自己安全
+            targets.depsUnavailable = reason ?? "网络不可用";
+          } else {
+            findings.push(...evaluateDependencies(packages, results, details));
+            targets.depsChecked = packages.length;
+            if (truncated) targets.depsTruncated = true;
+          }
+        }
+      } else {
+        targets.manifests = [];
+      }
+    }
   }
 
   // ---- 线上 ----
