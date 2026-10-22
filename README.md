@@ -101,7 +101,7 @@ npx surfacecheck . --url https://example.com
    严重  AWS Secret Access Key
       config/production.env:3
       FS5G********（40 字符）
-      出现在 commit 259120a
+      出现在 commit 92a4931
       → 在 IAM 里轮换该用户的 secret key。它比 Access Key ID 更要紧——
         ID 只是用户名，这个才是密码。
 

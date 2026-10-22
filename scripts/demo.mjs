@@ -27,25 +27,30 @@ const fake = (prefix, length, seed = 7) => {
 
 const dir = mkdtempSync(join(tmpdir(), "surfacecheck-demo-"));
 
-const git = (...args) =>
-  execFileSync("git", ["-c", "user.email=demo@example.com", "-c", "user.name=demo", ...args], {
-    cwd: dir,
-    stdio: "ignore",
-  });
+/**
+ * 所有 git 调用都走这里。
+ * 关键点：`-c user.email/-c user.name` 必须每一次都带上，不能只在 init 时带。
+ * 本机有全局 git 配置所以看不出来，CI 里没有——第一次跑就挂在 `git commit`
+ * 那句「Please tell me who you are」，而且因为 stdio 是 ignore，报错还是空的。
+ */
+const git = (args, env) => {
+  const result = execFileSync(
+    "git",
+    ["-c", "user.email=demo@example.com", "-c", "user.name=demo", ...args],
+    { cwd: dir, encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, ...env } }
+  );
+  return result;
+};
 
 const commitAt = (message, isoDate) => {
   // 用固定时间戳而不是「几天前」，这样每次跑出来的 commit SHA 都一样，
   // 文档里引用的输出才不会隔天就对不上。
-  execFileSync("git", ["add", "-A"], { cwd: dir, stdio: "ignore" });
-  execFileSync("git", ["commit", "-q", "-m", message], {
-    cwd: dir,
-    stdio: "ignore",
-    env: { ...process.env, GIT_AUTHOR_DATE: isoDate, GIT_COMMITTER_DATE: isoDate },
-  });
+  git(["add", "-A"]);
+  git(["commit", "-q", "-m", message], { GIT_AUTHOR_DATE: isoDate, GIT_COMMITTER_DATE: isoDate });
 };
 
 try {
-  git("init", "-q");
+  git(["init", "-q"]);
   mkdirSync(join(dir, "config"));
   mkdirSync(join(dir, "src"));
 
