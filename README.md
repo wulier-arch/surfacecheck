@@ -3,7 +3,7 @@
 一条命令看四处攻击面：**仓库里的明文凭据**（含 git 历史）、**线上 TLS 证书**、**HTTP 安全响应头**、
 **依赖漏洞**。结果按「能不能立刻被利用」排序，不是按字母排序。
 
-零依赖，148 个测试，Node ≥ 20。
+零依赖，150 个测试，Node ≥ 20。
 
 ```bash
 npx surfacecheck . --url https://example.com
@@ -226,7 +226,7 @@ surfacecheck --url <地址> [选项]
 ## 开发
 
 ```bash
-npm test                # 148 个测试，零依赖，只用 node:test
+npm test                # 150 个测试，零依赖，只用 node:test
 npm run check           # 文档事实核查 + 测试结构自检
 node scripts/demo.mjs   # 现场造一个泄露过的仓库再扫它
 ```

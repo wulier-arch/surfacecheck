@@ -151,3 +151,16 @@ test("parseCsp：忽略空段和多余分号", () => {
   const parsed = parseCsp("  default-src 'self' ;;  ; img-src *  ");
   assert.deepEqual(Object.keys(parsed), ["default-src", "img-src"]);
 });
+
+test("Server 头不带版本号时不报泄露（nginx / cloudflare 这类裸产品名很常见）", () => {
+  const found = ids(
+    evaluateHeaders(hardened({ server: "nginx", "x-powered-by": "Express" }))
+  );
+  assert.ok(!found.includes("version-leak"), `不该报 version-leak，实得 ${found.join(", ")}`);
+});
+
+test("Server 头带版本号时才报泄露", () => {
+  const found = ids(evaluateHeaders(hardened({ server: "nginx/1.25.3" })));
+  assert.ok(found.includes("version-leak"));
+});
+

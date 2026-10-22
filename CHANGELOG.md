@@ -2,6 +2,19 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [未发布]
+
+### 测试
+
+- 补上 `Server` 头「裸产品名」的回归用例：`server: nginx`、`x-powered-by: Express`
+  都不该报版本泄露，`nginx/1.25.3` 才报。原规则要求「含 `x.y` 形态的数字」，
+  裸名本来就通过——这条用例把行为钉住，免得以后有人为了「更稳」改成见数字就报。
+
+### 工程化
+
+- `src/cli.mjs` 标记为可执行（`package.json` 的 `bin` 直接指向它，带 shebang，
+  但提交模式是 644；本地 `chmod +x` 后 `git status` 会一直多一条「改了又没改」）
+
 ## [0.2.0] - 2026-10-22
 
 对齐 2026 年 10 月这一周真实发生的四起事件：PHP 的 php2shell（CVE-2026-109618 / 109619）、
